@@ -90,6 +90,9 @@ object opts {
 }
 
 object GenPass {
+  lazy val random = new SecureRandom()
+  lazy val pwLineReader = LineReaderBuilder.builder().build()
+  
   def main(args: Array[String]): Unit = {
     opts.parse(args)
     opts.mode match {

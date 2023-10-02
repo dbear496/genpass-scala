@@ -39,7 +39,14 @@ object opts {
     var i = 0;
     while(args.sizeIs > i) {
       args(i) match {
-        case "--create" => mode = "create"
+        case "--create" => {
+          mode = "create"
+          plainSeedFile = lifted(i + 1)
+            .orElse(throw new IllegalArgumentException(
+              s"no filename supplied for option ${args(i)}"))
+            .map(Paths.get)
+            .get
+        }
         case "--change" => mode = "change"
         case "--clipboard" | "-c" => { copy = true; outputDefault = false; }
         case "--no-clipboard" => copy = false

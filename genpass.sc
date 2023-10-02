@@ -2,11 +2,15 @@
 
 object conf {
   var root = Paths.get(Properties.userHome, ".genpass")
-  var seed = confRoot.resolve("seed")
-  var seedCheck = confRoot.resolve("seed_check")
-  var tags = confRoot.resolve("tags")
-  var saltstr = "salt".getBytes("UTF-8")
+  var seedFile = root.resolve("seed")
+  var seedCheck = root.resolve("seed_check")
+  var seedFileTmp = root.resolve("seed.tmp")
+  var seedCheckTmp = root.resolve("seed_check.tmp")
+  var tagsfile = root.resolve("tags")
+  var charset = Charset.forName("UTF-8")
+  var saltstr = "salt".getBytes(charset)
   var saltlen = 100000000
+  var digestAlgo = "SHA-256"
   
   def setRoot(newRoot: Path = root): Unit = {
     root = newRoot

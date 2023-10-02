@@ -105,33 +105,135 @@ object GenPass {
   }
   
   def normal(): Unit = {
+    // get the tag
+    val tag = promptTag()
+    val tagRaw = tag.getBytes(charset)
     
+    // get the seed
+    val seedDigest = Iterator
+      .continually {
+        pwLineReader.readLine("password: ", '\0')
+      }
+      .map(_.toCharArray)
+      .map(getSeedStream)
+      .map(seedDigest)
+      .find(verifySeed((MessageDigest)_.clone()) ||
+        {println("incorrect password, try again"); false})
+      .get
+    
+    // generate the password
+    val pwRaw = generatePassword(seedDigest, tagRaw)
+    val pwStr = new String(pwRaw, charset)
+    
+    // output the password
+    if(opts.copy) {
+      val clipboard = Toolkit.getDefaultToolkit().getSystemClipboard()
+      val cbOwner = new ClipboardOwner(){
+        var ownsCb = true
+        def lostOwnership(cb: Clipboard, contents: Transferable): Unit = {
+          ownsCb = false
+        }
+      }
+      val transferablePw = new StringSelection(pwStr)
+      clipboard.setContents(transferablePw, cbOwner)
+      
+      // TODO: clear the clipboard after 30 seconds
+      // NOTE: We want to clear the clipboard even after the terminal has been
+      // returned. I cannot find a platform-independent way to do this.
+      // NOTE: There is an inherent race condition where we may clear the wrong
+      // data from the clipboard if the user copies something between the time
+      // we check the contents and the time we perform the clear. I cannot find
+      // any atomic way to do this.
+      
+      // Thread.sleep(30000)
+      // if(
+      //   Option(clipboard.getContents(null))
+      //   .map(_.getTransferData(DataFlavor.stringFlavor))
+      //   // TODO: catch UnsupportedFlavorException
+      //   .exists(_ == pw)
+      // ) {
+      //   clipboard.setContents(null, null)
+      // }
+    }
+    if(opts.print) {
+      println(pwStr)
+    }
+    if(opts.outputFile.exists) {
+      // TODO: try-with-resources
+      val writer =
+        new FileWriter(opts.outputFile.get.toFile, conf.charset, false)
+      writer.write(pwStr)
+      writer.close()
+    }
   }
   
   def create(): Unit = {
     if(!Files.exists(conf.root))
       Files.createDirectories(conf.root)
     if(Files.exists(conf.seed)) {
-      println("WARNING! Changing the seed will change the generated passwords.")
-      if(!yesOrNo(
+      println("WARNING: Changing the seed will change generated passwords.")
+      if(!promptYesOrNo(
         "Are you sure you want to overwrite the existing seed? (y/n): ")
       ) {
         return
       }
     }
     
-    val lineReader: LineReaderBuilder.builder().build()
+    // get the new master password
+    val masterPw = promptNewPassword()
     
-    Iterator
-    .continually {
-      lineReader.readLine("old password: ", 0)
-    }
-    .map {
-      
-    }
+    // setup seed digest
+    val seedDigest = MessageDigest.getInstance(digestAlgo)
+    
+    // setup seed encryption
+    val pbkdfSalt = new Array[Byte](8)
+    random.nextBytes(pbkdfSalt)
+    
+    val keyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+    val keySpec = new PBEKeySpec(masterPw, pbkdfSalt, 10000,
+      256 + cipher.getBlockSize() * 8)
+    val keyAndIv = keyFactory.generateSecret(keyAndIvSpec).getEncoded()
+    val key = new SecretKeySpec(keyAndIv, 0, 32, "AES")
+    val iv = new IvParameterSpec(iv, 32, cipher.getBlockSize())
+    
+    val cipher = Cipher.getInstance("AES/CBC/PKCSC5Padding")
+    cipher.init(Cipher.ENCRYPT_MODE, key, iv)
+    
+    // encrypt the seed
+    val encSeedOut = new FileOutputStream(conf.seedFileTmp.toFile, false)
+    encSeedOut.write("Salted__".getBytes("US-ASCII"))
+    encSeedOut.write(pbkdfSalt)
+    new FileInputStream(plainSeedFile.toFile).transferTo(
+      new DigestOutputStream(
+        new CipherOutputStream(encSeedOut, cipher),
+        seedDigest
+      )
+    )
+    
+    applySalt(seedDigest)
+    val seedCheckOut = new FileOutputStream(conf.seedCheckTmp.toFile, false)
+    seedCheckOut.write(seedDigest.digest())
+    
+    Files.copy(conf.seedFileTmp, conf.seedFile, ATOMIC_MOVE, REPLACE_EXISTING)
+    Files.copy(conf.seedCheckTmp, conf.seedCheck, ATOMIC_MOVE, REPLACE_EXISTING)
+    
+    println("success")
   }
   
   def change(): Unit = {
+    // get and verify the master password
+    val oldPw = Iterator
+      .continually {
+        pwLineReader.readLine("old password: ", '\0')
+      }
+      .map(_.toCharArray)
+      .find(verifySeed(seedDigest(getSeedStream(_))) ||
+        {println("incorrect password, try again"); false})
+      .get
+    
+    // get the new master password
+    val newPw = promptNewPassword()
+    
     
   }
   
@@ -167,7 +269,7 @@ object GenPass {
     )
   }
   
-  def yesOrNo(prompt: String = "", default: Option[Boolean] = None): Boolean = {
+  def promptYesOrNo(prompt: String = "", default: Option[Boolean] = None): Boolean = {
     val lineReader: LineReaderBuilder.builder().build()
     Iterator
       .continually(lineReader.readLine(prompt))
@@ -179,7 +281,52 @@ object GenPass {
       .find(true).get
   }
   
-  def getSeed(masterPw: Array[Char]): Array[Byte] = {
+  def promptTag(): String = {
+    val lineReader: LineReaderBuilder.builder().build()
+    Iterator
+    .continually {
+      lineReader.readLine("tag: ")
+    }
+    .filter(!_.isEmpty || {println("tag may not be blank"); false})
+    .find { t =>
+      Source.fromFile(conf.tagsfile.toFile()).getLines().exists(_ == t) ||
+      promptYesOrNo(s"confirm new tag '${t}' (y/n): ") &&
+      {
+        // TODO: try-with-resources
+        val tagsWriter = new FileWriter(conf.tagsfile, conf.charset, true)
+        tagsWriter.write(t)
+        tagsWriter.close()
+        true
+      }
+    }.get
+  }
+  
+  def promptNewPassword(): String = {
+    Iterator
+      .continually {
+        pwLineReader.readLine("new password: ", '\0')
+      }
+      .find(_ == pwLineReader.readLine("confirm new password: ", '\0') ||
+        {println("passwords do not match, try again"); false})
+  }
+  
+  def createInitCipher(
+    masterPw: Array[Char],
+    pbkdfSalt: Array[Byte],
+    opmode: Int
+  ): Cipher = {
+    val cipher = Cipher.getInstance("AES/CBC/PKCSC5Padding")
+    val keyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+    val keySpec = new PBEKeySpec(masterPw, pbkdfSalt, 10000,
+      256 + cipher.getBlockSize() * 8)
+    val keyAndIv = keyFactory.generateSecret(keyAndIvSpec).getEncoded()
+    val key = new SecretKeySpec(keyAndIv, 0, 32, "AES")
+    val iv = new IvParameterSpec(iv, 32, cipher.getBlockSize())
+    cipher.init(opmode, key, iv)
+    cipher
+  }
+  
+  def getSeedStream(masterPw: Array[Char]): InputStream = {
     // I try to mimic openssl because that is what genpass-bash uses. The
     // specific command line genpass-bash uses is
     // openssl aes256 -e -pass file:<(echo -n $newpassword) -pbkdf2
@@ -187,27 +334,27 @@ object GenPass {
     // https://stackoverflow.com/questions/64295501/encryption-and-decryption-with-pbkdf2-and-aes256-practical-example-needed-ho
     // https://stackoverflow.com/questions/58823814/what-default-parameters-uses-openssl-pbkdf2
     // https://stackoverflow.com/questions/11783062/how-to-decrypt-file-in-java-encrypted-with-openssl-command-using-aes
+    // https://github.com/openssl/openssl/blob/8ed76c62b5d3214e807e684c06efd69c6471c800/providers/implementations/kdfs/pbkdf2.c#L304
     
     val encSeedIn = new FileInputStream(conf.seed.toFile())
     
     val pbkdfSalt = new Array[Byte](8)
     encSeedIn.skip(8) // skip the "Salted__" prefix
-    encSeedIn.read(pbkdfSalt, 0, 8)
+    if(encSeedIn.read(pbkdfSalt, 0, 8) != 8)
+      throw ...
     
-    val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-    val keySpec = new PBEKeySpec(masterPw, pbkdfSalt, 10000, 256)
-    val key = new SecretKeySpec(
-      factory.generateSecret(keySpec).getEncoded(), "AES")
-    
-    val iv = new Array[Byte](16) // todo: figure out how to get this
-    
-    val cipher = Cipher.getInstance("AES/CBC/PKCSC5Padding")
-    cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(iv))
-    val seedIn = new CipherInputStream(encSeedIn, cipher)
-    seedIn.readAllBytes()
+    val cipher = createInitCipher(masterPw, pbkdfSalt, Cipher.DECRYPT_MODE)
+    new CipherInputStream(encSeedIn, cipher)
   }
   
-  def applySalt(digest: MessageDigest): Unit = {
+  def seedDigest(seedStream: InputStream): MessageDigest = {
+    val digest = MessageDigest.getInstance(digestAlgo)
+    new DigestInputStream(seedStream, digest)
+      .transferTo(OutputStream.nullOutputStream)
+    digest
+  }
+  
+  def applySalt(digest: MessageDigest): MessageDigest = {
     if(conf.saltlen == 0)
       return
     
@@ -221,23 +368,25 @@ object GenPass {
       len -= conf.saltstr.length
     }
     digest.update(saltstr, 0, len)
-  }
-  
-  def initDigest(seed: Array[Byte]): MessageDigest = {
-    val digest = MessageDigest.getInstance("SHA-256")
-    digest.update(seed)
-    applySalt(digest)
     digest
   }
   
-  def verifySeed(seed: Array[Byte]): Boolean = {
+  def verifySeed(seedDigest: MessageDigest): Boolean = {
+    applySalt(seedDigest)
+    val digestBytes = seedDigest.digest()
+    
     val seedCheck = new FileInputStream(conf.seedCheck.toFile())
-    val seedDigest = initDigest(seed).digest()
     MessageDigest.isEqual(
-      seedCheck.readNBytes(seedDigest.length),
-      seedDigest
+      seedCheck.readNBytes(digestBytes.length),
+      digestBytes
     ) &&
     seedCheck.read() == -1
+  }
+  
+  def generatePassword(seedDigest: MessageDigest, tag: Array[Byte]): Array[Byte] = {
+    seedDigest.update(tag)
+    applySalt(seedDigest)
+    Base64.getEncoder().encode(seedDigest.digest())
   }
 }
 
